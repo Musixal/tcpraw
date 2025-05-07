@@ -1,25 +1,3 @@
-// The MIT License (MIT)
-//
-// Copyright (c) 2019 xtaci
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-
 //go:build linux
 
 package tcpraw
@@ -45,9 +23,8 @@ import (
 )
 
 var (
-	errOpNotImplemented = errors.New("operation not implemented") // Error for unimplemented operations
-	errTimeout          = errors.New("timeout")                   // Error for operation timeout
-	expire              = time.Minute                             // Duration to define expiration time for flows
+	errTimeout = errors.New("timeout") // Error for operation timeout
+	expire     = time.Minute           // Duration to define expiration time for flows
 )
 
 var (
@@ -63,14 +40,13 @@ type message struct {
 
 // a tcp flow information of a connection pair
 type tcpFlow struct {
-	conn         *net.TCPConn               // the related system TCP connection of this flow
-	handle       *net.IPConn                // the handle to send packets
-	seq          uint32                     // TCP sequence number
-	ack          uint32                     // TCP acknowledge number
-	networkLayer gopacket.SerializableLayer // network layer header for tx
-	ts           time.Time                  // last packet incoming time
-	buf          gopacket.SerializeBuffer   // a buffer for write
-	tcpHeader    layers.TCP
+	conn      *net.TCPConn             // the related system TCP connection of this flow
+	handle    *net.IPConn              // the handle to send packets
+	seq       uint32                   // TCP sequence number
+	ack       uint32                   // TCP acknowledge number
+	ts        time.Time                // last packet incoming time
+	buf       gopacket.SerializeBuffer // a buffer for write
+	tcpHeader layers.TCP
 }
 
 // TCPConn
@@ -86,8 +62,8 @@ type tcpConn struct {
 	dieOnce sync.Once
 
 	// the main golang sockets
-	tcpconn  *net.TCPConn     // from net.Dial
-	listener *net.TCPListener // from net.Listen
+	dialerConn *net.TCPConn     // from net.Dial
+	listener   *net.TCPListener // from net.Listen
 
 	// handles
 	handles []*net.IPConn
@@ -260,8 +236,8 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		}
 
 		var lport int
-		if conn.tcpconn != nil {
-			lport = conn.tcpconn.LocalAddr().(*net.TCPAddr).Port
+		if conn.dialerConn != nil {
+			lport = conn.dialerConn.LocalAddr().(*net.TCPAddr).Port
 		} else {
 			lport = conn.listener.Addr().(*net.TCPAddr).Port
 		}
@@ -304,7 +280,7 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 			e.buf.Clear()
 			gopacket.SerializeLayers(e.buf, conn.opts, &e.tcpHeader, gopacket.Payload(p))
-			if conn.tcpconn != nil {
+			if conn.dialerConn != nil {
 				_, err = e.handle.Write(e.buf.Bytes())
 			} else {
 				_, err = e.handle.WriteToIP(e.buf.Bytes(), &net.IPAddr{IP: raddr.IP})
@@ -326,9 +302,9 @@ func (conn *tcpConn) Close() error {
 		close(conn.die)
 
 		// close all established tcp connections
-		if conn.tcpconn != nil { // client
-			setTTL(conn.tcpconn, 64)
-			err = conn.tcpconn.Close()
+		if conn.dialerConn != nil { // client
+			setTTL(conn.dialerConn, 64)
+			err = conn.dialerConn.Close()
 		} else if conn.listener != nil {
 			err = conn.listener.Close() // server
 			conn.flowsLock.Lock()
@@ -365,8 +341,8 @@ func (conn *tcpConn) Close() error {
 
 // LocalAddr returns the local network address.
 func (conn *tcpConn) LocalAddr() net.Addr {
-	if conn.tcpconn != nil {
-		return conn.tcpconn.LocalAddr()
+	if conn.dialerConn != nil {
+		return conn.dialerConn.LocalAddr()
 	} else if conn.listener != nil {
 		return conn.listener.Addr()
 	}
@@ -460,7 +436,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn := new(tcpConn)
 	conn.die = make(chan struct{})
 	conn.flowTable = make(map[string]*tcpFlow)
-	conn.tcpconn = tcpconn
+	conn.dialerConn = tcpconn
 	conn.chMessage = make(chan message)
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 	conn.handles = append(conn.handles, handle)
