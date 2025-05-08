@@ -68,7 +68,7 @@ func startTCPRawServer() *TCPConn {
 				return
 			}
 			//echo
-			n, err = conn.WriteTo(buf[:n], addr)
+			_, err = conn.WriteTo(buf[:n], addr)
 			if err != nil {
 				log.Println("server writeTo:", err)
 				return
