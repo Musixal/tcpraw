@@ -39,20 +39,6 @@ type message struct {
 	addr net.Addr
 }
 
-// a tcp flow information of a connection pair
-type tcpFlow struct {
-	conn       *net.TCPConn             // the related system TCP connection of this flow
-	handle     *net.IPConn              // the handle to send packets
-	seq        uint32                   // TCP sequence number
-	ack        uint32                   // TCP acknowledge number
-	ts         time.Time                // last packet incoming time
-	buf        gopacket.SerializeBuffer // a buffer for write
-	tcpHeader  layers.TCP
-	mu         sync.Mutex // guard tcpFlow struct
-	ipv4Header layers.IPv4
-	ipv6Header layers.IPv6
-}
-
 // TCPConn, a wrapper for tcpconn for gc purpose
 type TCPConn struct {
 	*tcpConn
@@ -63,20 +49,18 @@ type flowKey struct {
 	port int
 }
 
-func makeFlowKey(addr net.Addr) flowKey {
-	tcpAddr, ok := addr.(*net.TCPAddr)
-	if !ok {
-		panic("makeFlowKey: expected *net.TCPAddr")
-	}
-
-	var key flowKey
-	ip := tcpAddr.IP.To16()
-	if ip == nil {
-		panic("makeFlowKey: invalid IP")
-	}
-	copy(key.ip[:], ip)
-	key.port = tcpAddr.Port
-	return key
+// a tcp flow information of a connection pair
+type tcpFlow struct {
+	conn       *net.TCPConn             // the related system TCP connection of this flow
+	handle     *net.IPConn              // the handle to send packets
+	seq        atomic.Uint32            // TCP sequence number
+	ack        atomic.Uint32            // TCP acknowledge number
+	ts         time.Time                // last packet incoming time
+	buf        gopacket.SerializeBuffer // a buffer for write
+	tcpHeader  layers.TCP
+	mu         sync.Mutex // mutex for ack, ts,seq and handle...
+	ipv4Header layers.IPv4
+	ipv6Header layers.IPv6
 }
 
 // tcpConn defines a TCP-packet oriented connection
@@ -97,7 +81,7 @@ type tcpConn struct {
 
 	// all TCP flows
 	flowTable map[flowKey]*tcpFlow
-	flowMu    sync.Mutex
+	flowMu    sync.RWMutex
 
 	// iptables
 	iptables  *iptables.IPTables // Handle for IPv4 iptables rules
@@ -112,13 +96,29 @@ type tcpConn struct {
 	readBuf []byte // simple leftover buffer
 }
 
+func makeFlowKey(addr net.Addr) flowKey {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		panic("makeFlowKey: expected *net.TCPAddr")
+	}
+
+	var key flowKey
+	ip := tcpAddr.IP.To16()
+	if ip == nil {
+		panic("makeFlowKey: invalid IP")
+	}
+	copy(key.ip[:], ip)
+	key.port = tcpAddr.Port
+	return key
+}
+
 func (conn *tcpConn) getOrCreateFlow(addr net.Addr) *tcpFlow {
 	key := makeFlowKey(addr)
 
-	conn.flowMu.Lock()
-	defer conn.flowMu.Unlock()
-
+	conn.flowMu.RLock()
 	flow, exists := conn.flowTable[key]
+	conn.flowMu.RUnlock()
+
 	if !exists {
 		flow = &tcpFlow{
 			ts:         getLocalTime(),
@@ -126,7 +126,9 @@ func (conn *tcpConn) getOrCreateFlow(addr net.Addr) *tcpFlow {
 			ipv4Header: layers.IPv4{Protocol: layers.IPProtocolTCP},
 			ipv6Header: layers.IPv6{NextHeader: layers.IPProtocolTCP},
 		}
+		conn.flowMu.Lock()
 		conn.flowTable[key] = flow
+		conn.flowMu.Unlock()
 	}
 	return flow
 }
@@ -360,20 +362,19 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 		// Update flow metadata
 		flow.ts = getLocalTime()
 
-		flow.mu.Lock()
-
 		if tcp.ACK {
-			flow.seq = tcp.Ack
+			flow.seq.Store(tcp.Ack)
 		}
 		if tcp.SYN {
-			flow.ack = tcp.Seq + 1
+			flow.ack.Store(tcp.Seq + 1)
 		}
-		if tcp.PSH && flow.ack == tcp.Seq {
-			flow.ack = tcp.Seq + uint32(len(tcp.Payload))
+		if tcp.PSH && flow.ack.Load() == tcp.Seq {
+			flow.ack.Store(tcp.Seq + uint32(len(tcp.Payload)))
 		}
-		flow.handle = handle
 
-		flow.mu.Unlock()
+		if flow.handle == nil {
+			flow.handle = handle
+		}
 
 		if flow.conn == nil {
 			continue
@@ -484,14 +485,14 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		// build tcp header with local and remote port
 		flow.tcpHeader.SrcPort = layers.TCPPort(lport)
 		flow.tcpHeader.DstPort = layers.TCPPort(addr.(*net.TCPAddr).Port)
-		flow.tcpHeader.Window = fingerPrintLinux.Window
-		flow.tcpHeader.Ack = flow.ack
-		flow.tcpHeader.Seq = flow.seq
+		flow.tcpHeader.Window = linuxFingerPrint.Window
+		flow.tcpHeader.Ack = flow.ack.Load()
+		flow.tcpHeader.Seq = flow.seq.Load()
 		flow.tcpHeader.PSH = true
 		flow.tcpHeader.ACK = true
-		flow.tcpHeader.Options = fingerPrintLinux.Options
+		flow.tcpHeader.Options = linuxFingerPrint.Options
 
-		makeOption(fingerPrintLinux.Type, flow.tcpHeader.Options)
+		setTimestampOption(flow.tcpHeader.Options)
 
 		if addr.(*net.TCPAddr).IP.To4() != nil {
 			flow.ipv4Header.SrcIP = flow.handle.LocalAddr().(*net.IPAddr).IP.To4()
@@ -503,7 +504,7 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			flow.tcpHeader.SetNetworkLayerForChecksum(&flow.ipv6Header)
 		}
 
-		flow.buf.Clear()
+		//	flow.buf.Clear()
 		gopacket.SerializeLayers(flow.buf, *globalOpts, &flow.tcpHeader, gopacket.Payload(p))
 
 		if conn.dialerConn != nil {
@@ -512,7 +513,7 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			_, err = flow.handle.WriteToIP(flow.buf.Bytes(), &net.IPAddr{IP: addr.(*net.TCPAddr).IP})
 		}
 		// increase seq in flow
-		flow.seq += uint32(len(p))
+		flow.seq.Add(uint32(len(p)))
 
 		return len(p), err
 	}
