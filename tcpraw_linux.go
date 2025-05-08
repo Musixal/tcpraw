@@ -4,8 +4,6 @@ package tcpraw
 
 import (
 	"container/list"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -49,14 +47,16 @@ type message struct {
 
 // a tcp flow information of a connection pair
 type tcpFlow struct {
-	conn      *net.TCPConn             // the related system TCP connection of this flow
-	handle    *net.IPConn              // the handle to send packets
-	seq       uint32                   // TCP sequence number
-	ack       uint32                   // TCP acknowledge number
-	ts        time.Time                // last packet incoming time
-	buf       gopacket.SerializeBuffer // a buffer for write
-	tcpHeader layers.TCP
-	mu        sync.Mutex // guard tcpFlow struct
+	conn       *net.TCPConn             // the related system TCP connection of this flow
+	handle     *net.IPConn              // the handle to send packets
+	seq        uint32                   // TCP sequence number
+	ack        uint32                   // TCP acknowledge number
+	ts         time.Time                // last packet incoming time
+	buf        gopacket.SerializeBuffer // a buffer for write
+	tcpHeader  layers.TCP
+	mu         sync.Mutex // guard tcpFlow struct
+	ipv4Header layers.IPv4
+	ipv6Header layers.IPv6
 }
 
 // TCPConn, a wrapper for tcpconn for gc purpose
@@ -127,8 +127,10 @@ func (conn *tcpConn) getOrCreateFlow(addr net.Addr) *tcpFlow {
 	flow, exists := conn.flowTable[key]
 	if !exists {
 		flow = &tcpFlow{
-			ts:  getLocalTime(),
-			buf: gopacket.NewSerializeBuffer(),
+			ts:         getLocalTime(),
+			buf:        gopacket.NewSerializeBuffer(),
+			ipv4Header: layers.IPv4{Protocol: layers.IPProtocolTCP},
+			ipv6Header: layers.IPv6{NextHeader: layers.IPProtocolTCP},
 		}
 		conn.flowTable[key] = flow
 	}
@@ -335,7 +337,7 @@ func Listen(network, address string) (*TCPConn, error) {
 // Create a sync.Pool for buffer reuse
 var bufPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 65536)
+		return make([]byte, 2048)
 	},
 }
 
@@ -407,21 +409,23 @@ func (conn *tcpConn) cleaner() {
 	ticker := time.NewTicker(time.Minute) // Create a ticker to trigger flow cleanup every minute
 	defer ticker.Stop()
 
-	select {
-	case <-conn.die: // Exit if the connection is closed
-		return
-	case <-ticker.C: // On each tick, clean up expired flows
-		conn.flowMu.Lock()
-		for k, v := range conn.flowTable {
-			if time.Since(v.ts) > expire { // Check if the flow has expired
-				if v.conn != nil {
-					setTTL(v.conn, 64) // Set TTL before closing the connection
-					v.conn.Close()
+	for {
+		select {
+		case <-conn.die: // Exit if the connection is closed
+			return
+		case <-ticker.C: // On each tick, clean up expired flows
+			conn.flowMu.Lock()
+			for k, v := range conn.flowTable {
+				if time.Since(v.ts) > expire { // Check if the flow has expired
+					if v.conn != nil {
+						setTTL(v.conn, 64) // Set TTL before closing the connection
+						v.conn.Close()
+					}
+					delete(conn.flowTable, k) // Remove the flow from the table
 				}
-				delete(conn.flowTable, k) // Remove the flow from the table
 			}
+			conn.flowMu.Unlock()
 		}
-		conn.flowMu.Unlock()
 	}
 }
 
@@ -461,8 +465,8 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	var deadline <-chan time.Time
 	if d, ok := conn.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
 		timer := time.NewTimer(time.Until(d))
-		defer timer.Stop()
 		deadline = timer.C
+		defer timer.Stop()
 	}
 
 	select {
@@ -471,11 +475,6 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	case <-conn.die:
 		return 0, io.EOF
 	default:
-		raddr, err := net.ResolveTCPAddr("tcp", addr.String())
-		if err != nil {
-			return 0, err
-		}
-
 		var lport int
 		if conn.dialerConn != nil {
 			lport = conn.dialerConn.LocalAddr().(*net.TCPAddr).Port
@@ -496,8 +495,7 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 		// build tcp header with local and remote port
 		flow.tcpHeader.SrcPort = layers.TCPPort(lport)
-		flow.tcpHeader.DstPort = layers.TCPPort(raddr.Port)
-		binary.Read(rand.Reader, binary.LittleEndian, &flow.tcpHeader.Window)
+		flow.tcpHeader.DstPort = layers.TCPPort(addr.(*net.TCPAddr).Port)
 		flow.tcpHeader.Window = fingerPrintLinux.Window
 		flow.tcpHeader.Ack = flow.ack
 		flow.tcpHeader.Seq = flow.seq
@@ -507,29 +505,23 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 
 		makeOption(fingerPrintLinux.Type, flow.tcpHeader.Options)
 
-		// build IP header with src & dst ip for TCP checksum
-		if raddr.IP.To4() != nil {
-			ip := &layers.IPv4{
-				Protocol: layers.IPProtocolTCP,
-				SrcIP:    flow.handle.LocalAddr().(*net.IPAddr).IP.To4(),
-				DstIP:    raddr.IP.To4(),
-			}
-			flow.tcpHeader.SetNetworkLayerForChecksum(ip)
+		if addr.(*net.TCPAddr).IP.To4() != nil {
+			flow.ipv4Header.SrcIP = flow.handle.LocalAddr().(*net.IPAddr).IP.To4()
+			flow.ipv4Header.DstIP = addr.(*net.TCPAddr).IP.To4()
+			flow.tcpHeader.SetNetworkLayerForChecksum(&flow.ipv4Header)
 		} else {
-			ip := &layers.IPv6{
-				NextHeader: layers.IPProtocolTCP,
-				SrcIP:      flow.handle.LocalAddr().(*net.IPAddr).IP.To16(),
-				DstIP:      raddr.IP.To16(),
-			}
-			flow.tcpHeader.SetNetworkLayerForChecksum(ip)
+			flow.ipv6Header.SrcIP = flow.handle.LocalAddr().(*net.IPAddr).IP.To16()
+			flow.ipv6Header.DstIP = addr.(*net.TCPAddr).IP.To16()
+			flow.tcpHeader.SetNetworkLayerForChecksum(&flow.ipv6Header)
 		}
 
 		flow.buf.Clear()
 		gopacket.SerializeLayers(flow.buf, *globalOpts, &flow.tcpHeader, gopacket.Payload(p))
+
 		if conn.dialerConn != nil {
 			_, err = flow.handle.Write(flow.buf.Bytes())
 		} else {
-			_, err = flow.handle.WriteToIP(flow.buf.Bytes(), &net.IPAddr{IP: raddr.IP})
+			_, err = flow.handle.WriteToIP(flow.buf.Bytes(), &net.IPAddr{IP: addr.(*net.TCPAddr).IP})
 		}
 		// increase seq in flow
 		flow.seq += uint32(len(p))
