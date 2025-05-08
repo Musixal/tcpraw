@@ -4,6 +4,7 @@ package tcpraw
 
 import (
 	"container/list"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -344,57 +345,65 @@ var bufPool = &sync.Pool{
 	},
 }
 
-// captureFlow capture every inbound packets based on rules of BPF
 func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
-	buf := bufPool.Get().(*[]byte) // Get a pointer to the buffer
-	defer bufPool.Put(buf)         // Return the pointer to the pool when done
-
-	opt := gopacket.DecodeOptions{NoCopy: true, Lazy: true}
+	buf := bufPool.Get().(*[]byte)
+	defer bufPool.Put(buf)
 
 	for {
 		n, addr, err := handle.ReadFromIP(*buf)
 		if err != nil {
 			return
 		}
-	 
-		packet := gopacket.NewPacket((*buf)[:n], layers.LayerTypeTCP, opt)
-		tcp, ok := packet.TransportLayer().(*layers.TCP)
-		if !ok || int(tcp.DstPort) != port {
+		if n < 20 {
+			continue // Not enough for TCP header
+		}
+
+		data := (*buf)[:n]
+
+		dstPort := binary.BigEndian.Uint16(data[2:4])
+		if int(dstPort) != port {
 			continue
 		}
 
-		src := &net.TCPAddr{IP: addr.IP, Port: int(tcp.SrcPort)}
+		srcPort := binary.BigEndian.Uint16(data[0:2])
+		seq := binary.BigEndian.Uint32(data[4:8])
+		ack := binary.BigEndian.Uint32(data[8:12])
+		dataOffset := (data[12] >> 4) * 4 // in bytes
+		flags := data[13]
+		psh := flags&0x08 != 0
+		ackFlag := flags&0x10 != 0
+		syn := flags&0x02 != 0
 
-		// flow maintaince
+		src := &net.TCPAddr{IP: addr.IP, Port: int(srcPort)}
+
+		// flow maintenance
 		flow := conn.getOrCreateFlow(src)
-
-		// Update flow metadata
 		flow.ts = getLocalTime()
 
-		if tcp.ACK {
-			flow.seq.Store(tcp.Ack)
+		if ackFlag {
+			flow.seq.Store(ack)
 		}
-		if tcp.SYN {
-			flow.ack.Store(tcp.Seq + 1)
+		if syn {
+			flow.ack.Store(seq + 1)
 		}
-		if tcp.PSH && flow.ack.Load() == tcp.Seq {
-			flow.ack.Store(tcp.Seq + uint32(len(tcp.Payload)))
+		payload := data[dataOffset:]
+		if psh && flow.ack.Load() == seq {
+			flow.ack.Store(seq + uint32(len(payload)))
 		}
 
 		if flow.handle == nil {
 			flow.handle = handle
 		}
-
 		if flow.conn == nil {
 			continue
 		}
 
 		// deliver packet
-		if tcp.PSH {
-			payload := make([]byte, len(tcp.Payload))
-			copy(payload, tcp.Payload)
+		if psh && len(payload) > 0 {
+			cp := make([]byte, len(payload))
+			copy(cp, payload)
 			select {
-			case conn.chMessage <- message{bts: payload, addr: src}:
+			case conn.chMessage <- message{bts: cp, addr: src}:
 			case <-conn.die:
 				return
 			}
