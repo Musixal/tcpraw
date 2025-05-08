@@ -1,12 +1,12 @@
 cpu:
-	sudo go test -bench=. -cpuprofile=cpu.out
+	 go test -bench=. -cpuprofile=cpu.out
 mem:
-	sudo go test -bench=. -benchmem -memprofile=mem.out
+	 go test -bench=. -benchmem -memprofile=mem.out
 alloc:
-	sudo go test -gcflags="-m"
+	 go test -gcflags="-m"
 c:
 	go tool pprof cpu.out
 m:
 	go tool pprof mem.out
 bench:
-	sudo go test -bench=. -benchmem
+	 go test -bench=. -benchmem

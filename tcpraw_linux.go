@@ -33,12 +33,6 @@ var globalOpts = &gopacket.SerializeOptions{
 	ComputeChecksums: true,
 }
 
-var messagePool = &sync.Pool{
-	New: func() any {
-		return new(message)
-	},
-}
-
 // a message from NIC
 type message struct {
 	bts  []byte
@@ -344,8 +338,6 @@ var bufPool = sync.Pool{
 // captureFlow capture every inbound packets based on rules of BPF
 func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 	buf := bufPool.Get().([]byte)
-	defer bufPool.Put(buf)
-
 	opt := gopacket.DecodeOptions{NoCopy: true, Lazy: true}
 
 	for {
@@ -387,20 +379,14 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 			continue
 		}
 
-		msg := messagePool.Get().(*message)
-		msg.bts = tcp.Payload
-		msg.addr = src
-
 		// deliver packet
 		if tcp.PSH {
 			select {
-			case conn.chMessage <- *msg:
+			case conn.chMessage <- message{bts: tcp.Payload, addr: src}:
 			case <-conn.die:
 				return
 			}
 		}
-
-		messagePool.Put(msg)
 	}
 }
 
