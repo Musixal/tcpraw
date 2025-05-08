@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -58,6 +59,7 @@ type tcpFlow struct {
 	ack        atomic.Uint32            // TCP acknowledge number
 	ts         time.Time                // last packet incoming time
 	buf        gopacket.SerializeBuffer // a buffer for write
+	payload    gopacket.Payload
 	tcpHeader  layers.TCP
 	mu         sync.Mutex // mutex for ack, ts,seq and handle...
 	ipv4Header layers.IPv4
@@ -181,9 +183,12 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
+	raddrIP := raddr.IP.String()
+	raddrPort := strconv.Itoa(raddr.Port)
+
 	// setup iptables only when it's the first connection
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4); err == nil {
-		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+		rule := []string{"-m", "ttl", "--ttl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddrIP, "--dport", raddrPort, "-j", "DROP"}
 		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
 			if !exists {
 				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
@@ -194,7 +199,7 @@ func Dial(network, address string) (*TCPConn, error) {
 		}
 	}
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
-		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddr.IP.String(), "--dport", fmt.Sprint(raddr.Port), "-j", "DROP"}
+		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "-s", laddr, "--sport", lport, "-d", raddrIP, "--dport", raddrPort, "-j", "DROP"}
 		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
 			if !exists {
 				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
@@ -293,8 +298,10 @@ func Listen(network, address string) (*TCPConn, error) {
 		}
 	}
 
+	laddrPort := strconv.Itoa(laddr.Port)
+
 	if ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv6); err == nil {
-		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "--sport", fmt.Sprint(laddr.Port), "-j", "DROP"}
+		rule := []string{"-m", "hl", "--hl-eq", "1", "-p", "tcp", "--sport", laddrPort, "-j", "DROP"}
 		if exists, err := ipt.Exists("filter", "OUTPUT", rule...); err == nil {
 			if !exists {
 				if err = ipt.Append("filter", "OUTPUT", rule...); err == nil {
@@ -406,6 +413,8 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 			case conn.chMessage <- message{bts: cp, addr: src}:
 			case <-conn.die:
 				return
+			default:
+				// channel is full
 			}
 		}
 	}
@@ -515,8 +524,9 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			flow.tcpHeader.SetNetworkLayerForChecksum(&flow.ipv6Header)
 		}
 
-		//	flow.buf.Clear()
-		gopacket.SerializeLayers(flow.buf, *globalOpts, &flow.tcpHeader, gopacket.Payload(p))
+		flow.payload = gopacket.Payload(p)
+
+		gopacket.SerializeLayers(flow.buf, *globalOpts, &flow.tcpHeader, &flow.payload)
 
 		if conn.dialerConn != nil {
 			_, err = flow.handle.Write(flow.buf.Bytes())
