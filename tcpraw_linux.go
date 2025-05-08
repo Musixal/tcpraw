@@ -35,6 +35,12 @@ var globalOpts = &gopacket.SerializeOptions{
 	ComputeChecksums: true,
 }
 
+var messagePool = &sync.Pool{
+	New: func() any {
+		return new(message)
+	},
+}
+
 // a message from NIC
 type message struct {
 	bts  []byte
@@ -58,6 +64,27 @@ type TCPConn struct {
 	*tcpConn
 }
 
+type flowKey struct {
+	ip   [16]byte // IPv6 max size
+	port int
+}
+
+func makeFlowKey(addr net.Addr) flowKey {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		panic("makeFlowKey: expected *net.TCPAddr")
+	}
+
+	var key flowKey
+	ip := tcpAddr.IP.To16()
+	if ip == nil {
+		panic("makeFlowKey: invalid IP")
+	}
+	copy(key.ip[:], ip)
+	key.port = tcpAddr.Port
+	return key
+}
+
 // tcpConn defines a TCP-packet oriented connection
 type tcpConn struct {
 	elem    *list.Element // elem in the list
@@ -75,7 +102,7 @@ type tcpConn struct {
 	chMessage chan message
 
 	// all TCP flows
-	flowTable map[string]*tcpFlow
+	flowTable map[flowKey]*tcpFlow
 	flowMu    sync.Mutex
 
 	// iptables
@@ -92,7 +119,7 @@ type tcpConn struct {
 }
 
 func (conn *tcpConn) getOrCreateFlow(addr net.Addr) *tcpFlow {
-	key := addr.String()
+	key := makeFlowKey(addr)
 
 	conn.flowMu.Lock()
 	defer conn.flowMu.Unlock()
@@ -137,7 +164,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	// fields
 	conn := new(tcpConn)
 	conn.die = make(chan struct{})
-	conn.flowTable = make(map[string]*tcpFlow)
+	conn.flowTable = make(map[flowKey]*tcpFlow)
 	conn.dialerConn = tcpconn
 	conn.chMessage = make(chan message, messageBufferSize) // buffer up to 10k message!
 	conn.getOrCreateFlow(tcpconn.RemoteAddr()).conn = tcpconn
@@ -191,7 +218,7 @@ func Dial(network, address string) (*TCPConn, error) {
 func Listen(network, address string) (*TCPConn, error) {
 	// fields
 	conn := new(tcpConn)
-	conn.flowTable = make(map[string]*tcpFlow)
+	conn.flowTable = make(map[flowKey]*tcpFlow)
 	conn.die = make(chan struct{})
 	conn.chMessage = make(chan message, messageBufferSize)
 
@@ -357,14 +384,21 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 		if flow.conn == nil {
 			continue
 		}
+
+		msg := messagePool.Get().(*message)
+		msg.bts = tcp.Payload
+		msg.addr = src
+
 		// deliver packet
 		if tcp.PSH {
 			select {
-			case conn.chMessage <- message{tcp.Payload, src}:
+			case conn.chMessage <- *msg:
 			case <-conn.die:
 				return
 			}
 		}
+
+		messagePool.Put(msg)
 	}
 }
 
