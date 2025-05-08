@@ -6,40 +6,36 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-type FingerPrintType int
-
-const (
-	TypeLinux FingerPrintType = iota
-)
-
-type fingerPrint struct {
-	Type    FingerPrintType
-	Window  uint16
-	Options []layers.TCPOption
-	TTL     uint16
-}
-
-// options [nop,nop,TS val 1940162183 ecr 1366690553]
-var fingerPrintLinux = &fingerPrint{
-	Type:   TypeLinux,
-	Window: 65535,
-	Options: []layers.TCPOption{
-		{1, 0, nil},
-		{1, 0, nil},
-		{8, 10, make([]byte, 10)}, // len = 10
-	},
-	TTL: 64,
-}
-
-var defaultFingerPrint = fingerPrintLinux
-
 var seed uint32
 
-func makeOption(optType FingerPrintType, options []layers.TCPOption) {
-	switch optType {
-	case TypeLinux:
-		nowMilli := getLocalTime().UnixNano() / 1e9
-		binary.BigEndian.PutUint32(options[2].OptionData[:4], uint32(nowMilli))
-		binary.BigEndian.PutUint32(options[2].OptionData[4:], uint32(seed+uint32(nowMilli)))
-	}
+// Fingerprint used to mimic a Linux TCP stack (NOP, NOP, Timestamp)
+var linuxFingerPrint = &fingerPrint{
+	Window: 65535,
+	TTL:    64,
+	Options: []layers.TCPOption{
+		{OptionType: 1, OptionLength: 0, OptionData: nil},               // NOP
+		{OptionType: 1, OptionLength: 0, OptionData: nil},               // NOP
+		{OptionType: 8, OptionLength: 10, OptionData: make([]byte, 10)}, // Timestamp
+	},
+}
+
+type fingerPrint struct {
+	Window  uint16
+	TTL     uint16
+	Options []layers.TCPOption
+}
+
+// Sets TSval and TSecr in the timestamp option
+func setTimestampOption(options []layers.TCPOption) {
+	// Use current time as a timestamp
+	now := uint32(getLocalTime().UnixMilli())
+
+	// Timestamp option is at index 2
+	data := options[2].OptionData
+
+	// Set TSval (Timestamp Value)
+	binary.BigEndian.PutUint32(data, now)
+
+	// Set TSecr (Timestamp Echo Reply) based on seed + current time
+	binary.BigEndian.PutUint32(data[4:], seed+now)
 }
