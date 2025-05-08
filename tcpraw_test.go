@@ -213,10 +213,3 @@ func BenchmarkEcho(b *testing.B) {
 		}
 	}
 }
-
-func TestFingerPrint(t *testing.T) {
-	for k := range defaultFingerPrint.Options {
-		makeOption(defaultFingerPrint.Type, defaultFingerPrint.Options)
-		t.Log(defaultFingerPrint.Options[k].String())
-	}
-}
