@@ -381,8 +381,10 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 
 		// deliver packet
 		if tcp.PSH {
+			payload := make([]byte, len(tcp.Payload))
+			copy(payload, tcp.Payload)
 			select {
-			case conn.chMessage <- message{bts: tcp.Payload, addr: src}:
+			case conn.chMessage <- message{bts: payload, addr: src}:
 			case <-conn.die:
 				return
 			}
