@@ -88,12 +88,6 @@ type tcpConn struct {
 	readDeadline  atomic.Value // Atomic value for read deadline
 	writeDeadline atomic.Value // Atomic value for write deadline
 
-	// serialization
-	//opts gopacket.SerializeOptions
-
-	// fingerprints
-	//tcpFingerPrint fingerPrint
-
 	readBuf []byte // simple leftover buffer
 }
 
@@ -106,7 +100,7 @@ func (conn *tcpConn) getOrCreateFlow(addr net.Addr) *tcpFlow {
 	flow, exists := conn.flowTable[key]
 	if !exists {
 		flow = &tcpFlow{
-			ts:  localtime,
+			ts:  getLocalTime(),
 			buf: gopacket.NewSerializeBuffer(),
 		}
 		conn.flowTable[key] = flow
@@ -148,11 +142,6 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.chMessage = make(chan message, messageBufferSize) // buffer up to 10k message!
 	conn.getOrCreateFlow(tcpconn.RemoteAddr()).conn = tcpconn
 	conn.handles = append(conn.handles, handle)
-	//conn.opts = gopacket.SerializeOptions{
-	//	FixLengths:       true,
-	//	ComputeChecksums: true,
-	//}
-	//conn.tcpFingerPrint = fingerPrintLinux
 
 	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
 	go conn.cleaner()
@@ -205,11 +194,6 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn.flowTable = make(map[string]*tcpFlow)
 	conn.die = make(chan struct{})
 	conn.chMessage = make(chan message, messageBufferSize)
-	//conn.opts = gopacket.SerializeOptions{
-	//	FixLengths:       true,
-	//	ComputeChecksums: true,
-	//}
-	//conn.tcpFingerPrint = fingerPrintLinux
 
 	// resolve address
 	laddr, err := net.ResolveTCPAddr(network, address)
@@ -353,7 +337,7 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 		flow := conn.getOrCreateFlow(src)
 
 		// Update flow metadata
-		flow.ts = localtime
+		flow.ts = getLocalTime()
 
 		flow.mu.Lock()
 
@@ -480,13 +464,11 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		flow.tcpHeader.SrcPort = layers.TCPPort(lport)
 		flow.tcpHeader.DstPort = layers.TCPPort(raddr.Port)
 		binary.Read(rand.Reader, binary.LittleEndian, &flow.tcpHeader.Window)
-		//flow.tcpHeader.Window = conn.tcpFingerPrint.Window
 		flow.tcpHeader.Window = fingerPrintLinux.Window
 		flow.tcpHeader.Ack = flow.ack
 		flow.tcpHeader.Seq = flow.seq
 		flow.tcpHeader.PSH = true
 		flow.tcpHeader.ACK = true
-		//flow.tcpHeader.Options = conn.tcpFingerPrint.Options
 		flow.tcpHeader.Options = fingerPrintLinux.Options
 
 		makeOption(fingerPrintLinux.Type, flow.tcpHeader.Options)
