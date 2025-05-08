@@ -16,7 +16,9 @@ func init() {
 }
 
 func localTicker() {
-	tick := time.NewTicker(100 * time.Millisecond)
+	localTime = time.Now()
+
+	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 
 	for t := range tick.C {
