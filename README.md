@@ -17,7 +17,7 @@
 
 # Introduction
 
-A packet-oriented connection by simulating TCP protocol
+A packet-oriented connection by simulating TCP protocol with some improvements.
 
 ## Features
 
@@ -46,6 +46,4 @@ ok  	github.com/xtaci/tcpraw	2.758s
 
 Stable
 
-## Who is using this
 
-https://github.com/xtaci/kcptun
