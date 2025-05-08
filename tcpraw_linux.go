@@ -61,6 +61,7 @@ type tcpFlow struct {
 	mu         sync.Mutex // mutex for ack, ts,seq and handle...
 	ipv4Header layers.IPv4
 	ipv6Header layers.IPv6
+	lport      int
 }
 
 // tcpConn defines a TCP-packet oriented connection
@@ -165,7 +166,9 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.flowTable = make(map[flowKey]*tcpFlow)
 	conn.dialerConn = tcpconn
 	conn.chMessage = make(chan message, messageBufferSize) // buffer up to 10k message!
-	conn.getOrCreateFlow(tcpconn.RemoteAddr()).conn = tcpconn
+	flow := conn.getOrCreateFlow(tcpconn.RemoteAddr())
+	flow.conn = tcpconn
+	flow.lport = tcpconn.LocalAddr().(*net.TCPAddr).Port
 	conn.handles = append(conn.handles, handle)
 
 	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
@@ -315,7 +318,9 @@ func Listen(network, address string) (*TCPConn, error) {
 			}
 
 			// record net.Conn
-			conn.getOrCreateFlow(tcpconn.RemoteAddr()).conn = tcpconn
+			flow := conn.getOrCreateFlow(tcpconn.RemoteAddr())
+			flow.conn = tcpconn
+			flow.lport = conn.listener.Addr().(*net.TCPAddr).Port
 
 			// discard everything
 			go io.Copy(io.Discard, tcpconn)
@@ -331,24 +336,28 @@ func Listen(network, address string) (*TCPConn, error) {
 }
 
 // Create a sync.Pool for buffer reuse
-var bufPool = sync.Pool{
+var bufPool = &sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 2048)
+		// Initialize a buffer of a reasonable size (e.g., 2048 bytes)
+		buf := make([]byte, 2048)
+		return &buf // Return a pointer to the byte slice
 	},
 }
 
 // captureFlow capture every inbound packets based on rules of BPF
 func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
-	buf := bufPool.Get().([]byte)
+	buf := bufPool.Get().(*[]byte) // Get a pointer to the buffer
+	defer bufPool.Put(buf)         // Return the pointer to the pool when done
+
 	opt := gopacket.DecodeOptions{NoCopy: true, Lazy: true}
 
 	for {
-		n, addr, err := handle.ReadFromIP(buf)
+		n, addr, err := handle.ReadFromIP(*buf)
 		if err != nil {
 			return
 		}
-
-		packet := gopacket.NewPacket(buf[:n], layers.LayerTypeTCP, opt)
+	 
+		packet := gopacket.NewPacket((*buf)[:n], layers.LayerTypeTCP, opt)
 		tcp, ok := packet.TransportLayer().(*layers.TCP)
 		if !ok || int(tcp.DstPort) != port {
 			continue
@@ -464,17 +473,7 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	case <-conn.die:
 		return 0, io.EOF
 	default:
-		var lport int
-		if conn.dialerConn != nil {
-			lport = conn.dialerConn.LocalAddr().(*net.TCPAddr).Port
-		} else {
-			lport = conn.listener.Addr().(*net.TCPAddr).Port
-		}
-
 		flow := conn.getOrCreateFlow(addr)
-
-		flow.mu.Lock()
-		defer flow.mu.Unlock()
 
 		// if the flow doesn't have handle , assume this packet has lost, without notification
 		if flow.handle == nil {
@@ -482,12 +481,15 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 			return len(p), nil
 		}
 
-		// build tcp header with local and remote port
-		flow.tcpHeader.SrcPort = layers.TCPPort(lport)
-		flow.tcpHeader.DstPort = layers.TCPPort(addr.(*net.TCPAddr).Port)
-		flow.tcpHeader.Window = linuxFingerPrint.Window
 		flow.tcpHeader.Ack = flow.ack.Load()
 		flow.tcpHeader.Seq = flow.seq.Load()
+
+		flow.mu.Lock()
+
+		// build tcp header with local and remote port
+		flow.tcpHeader.SrcPort = layers.TCPPort(flow.lport)
+		flow.tcpHeader.DstPort = layers.TCPPort(addr.(*net.TCPAddr).Port)
+		flow.tcpHeader.Window = linuxFingerPrint.Window
 		flow.tcpHeader.PSH = true
 		flow.tcpHeader.ACK = true
 		flow.tcpHeader.Options = linuxFingerPrint.Options
@@ -512,6 +514,9 @@ func (conn *tcpConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		} else {
 			_, err = flow.handle.WriteToIP(flow.buf.Bytes(), &net.IPAddr{IP: addr.(*net.TCPAddr).IP})
 		}
+
+		flow.mu.Unlock()
+
 		// increase seq in flow
 		flow.seq.Add(uint32(len(p)))
 
