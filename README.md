@@ -26,21 +26,28 @@ A packet-oriented connection by simulating TCP protocol with some improvements.
 2. Realistic sliding window, NAT friendly.
 3. Pure golang without cgo, available on all architecture.
 
-## Documentation
-
-For complete documentation, see the associated [Godoc](https://godoc.org/github.com/xtaci/tcpraw).
-
 
 ## Benchmark
 
+**xtaci**
 ```
 goos: linux
 goarch: amd64
 pkg: github.com/xtaci/tcpraw
-BenchmarkEcho-2   	   20000	     93036 ns/op	  11.01 MB/s	    6200 B/op	      62 allocs/op
+BenchmarkEcho-4            15074             79522 ns/op          12.88 MB/s        6114 B/op         56 allocs/op
 PASS
-ok  	github.com/xtaci/tcpraw	2.758s
 ```
+
+
+**Musixal**
+```
+goos: linux
+goarch: amd64
+pkg: github.com/Musixal/tcpraw
+BenchmarkEcho-4            18313             62983 ns/op          16.26 MB/s        2698 B/op         14 allocs/op
+PASS
+```
+
 
 ## Status
 
