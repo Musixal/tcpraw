@@ -44,7 +44,7 @@ PASS
 goos: linux
 goarch: amd64
 pkg: github.com/Musixal/tcpraw
-BenchmarkEcho-4            18313             62983 ns/op          16.26 MB/s        2698 B/op         14 allocs/op
+BenchmarkEcho-4            25237             48274 ns/op          21.21 MB/s        2493 B/op         10 allocs/op
 PASS
 ```
 
