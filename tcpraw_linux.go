@@ -157,6 +157,10 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
+	if err := applyBPF(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port); err != nil {
+		return nil, err
+	}
+
 	// parse local ip and port from tcpconn
 	laddr, lport, err := net.SplitHostPort(tcpconn.LocalAddr().String())
 	if err != nil {
@@ -174,7 +178,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	flow.lport = tcpconn.LocalAddr().(*net.TCPAddr).Port
 	conn.handles = append(conn.handles, handle)
 
-	go conn.captureFlow(handle, tcpconn.LocalAddr().(*net.TCPAddr).Port)
+	go conn.captureFlow(handle)
 	go conn.cleaner()
 
 	// iptables
@@ -248,8 +252,13 @@ func Listen(network, address string) (*TCPConn, error) {
 				for _, addr := range addrs {
 					if ipaddr, ok := addr.(*net.IPNet); ok {
 						if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: ipaddr.IP}); err == nil {
-							conn.handles = append(conn.handles, handle)
-							go conn.captureFlow(handle, laddr.Port)
+							if err := applyBPF(handle, laddr.Port); err == nil {
+								conn.handles = append(conn.handles, handle)
+								go conn.captureFlow(handle)
+							} else {
+								fmt.Printf("failed to apply BPF filter on %s", ipaddr.IP)
+								handle.Close()
+							}
 						} else {
 							lasterr = err
 						}
@@ -264,8 +273,13 @@ func Listen(network, address string) (*TCPConn, error) {
 
 	} else {
 		if handle, err := net.ListenIP("ip:tcp", &net.IPAddr{IP: laddr.IP}); err == nil {
-			conn.handles = append(conn.handles, handle)
-			go conn.captureFlow(handle, laddr.Port)
+			if err := applyBPF(handle, laddr.Port); err == nil {
+				conn.handles = append(conn.handles, handle)
+				go conn.captureFlow(handle)
+			} else {
+				fmt.Printf("failed to apply BPF filter on %s", laddr.IP)
+				handle.Close()
+			}
 
 		} else {
 			return nil, err
@@ -352,7 +366,7 @@ var bufPool = &sync.Pool{
 	},
 }
 
-func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
+func (conn *tcpConn) captureFlow(handle *net.IPConn) {
 	buf := bufPool.Get().(*[]byte)
 	defer bufPool.Put(buf)
 
@@ -367,10 +381,11 @@ func (conn *tcpConn) captureFlow(handle *net.IPConn, port int) {
 
 		data := (*buf)[:n]
 
-		dstPort := binary.BigEndian.Uint16(data[2:4])
-		if int(dstPort) != port {
-			continue
-		}
+		// Using BPF instead of this shit
+		// dstPort := binary.BigEndian.Uint16(data[2:4])
+		// if int(dstPort) != port {
+		// 	continue
+		// }
 
 		srcPort := binary.BigEndian.Uint16(data[0:2])
 		seq := binary.BigEndian.Uint32(data[4:8])
