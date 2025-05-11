@@ -96,8 +96,6 @@ type tcpConn struct {
 	// deadlines
 	readDeadline  atomic.Value // Atomic value for read deadline
 	writeDeadline atomic.Value // Atomic value for write deadline
-
-	readBuf []byte // simple leftover buffer
 }
 
 func makeFlowKey(addr net.Addr) flowKey {
@@ -256,7 +254,7 @@ func Listen(network, address string) (*TCPConn, error) {
 								conn.handles = append(conn.handles, handle)
 								go conn.captureFlow(handle)
 							} else {
-								fmt.Printf("failed to apply BPF filter on %s", ipaddr.IP)
+								fmt.Printf("failed to apply BPF on %s", ipaddr.IP)
 								handle.Close()
 							}
 						} else {
@@ -277,7 +275,7 @@ func Listen(network, address string) (*TCPConn, error) {
 				conn.handles = append(conn.handles, handle)
 				go conn.captureFlow(handle)
 			} else {
-				fmt.Printf("failed to apply BPF filter on %s", laddr.IP)
+				fmt.Printf("failed to apply BPF on %s", laddr.IP)
 				handle.Close()
 			}
 
@@ -468,13 +466,6 @@ func (conn *tcpConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		deadline = timer.C
 	}
 
-	// Serve from leftover buffer first
-	if len(conn.readBuf) > 0 {
-		n := copy(p, conn.readBuf)
-		conn.readBuf = conn.readBuf[n:]
-		return n, nil, nil
-	}
-
 	select {
 	case <-deadline:
 		return 0, nil, errTimeout
@@ -483,10 +474,6 @@ func (conn *tcpConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	case pkt := <-conn.chMessage:
 		// Copy as much as we can
 		n := copy(p, pkt.bts)
-		if n < len(pkt.bts) {
-			// Save remaining bytes
-			conn.readBuf = pkt.bts[n:]
-		}
 		return n, pkt.addr, nil
 	}
 }
